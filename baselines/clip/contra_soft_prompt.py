@@ -10,7 +10,8 @@ from PIL import Image
 
 import clip
 import torch
-import tqdm
+
+# import tqdm
 
 import wandb
 from torch import nn, optim
@@ -102,7 +103,7 @@ class SoftEmbedding(nn.Module):
         return learned_embeddings
 
     def _init_sample_random_embedding(self, embeddings, n_tokens, *args, **kwargs):
-        idxs = torch.randperm(self.embeddings.size(0))[: self.n_tokens]
+        idxs = torch.randperm(embeddings.size(0))[: self.n_tokens]
         return embeddings[idxs].clone().detach()
 
     def forward(self, embeddings: torch.Tensor):
@@ -138,7 +139,7 @@ args = parser.parse_args()
 wandb.config.update(args)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"DEVICE USED: {device}")
+print(f"DEVICE USED: {device}", flush=True)
 model, preprocess = clip.load("ViT-B/16", device=device, jit=False)
 wandb.watch(model)
 model.float()
@@ -249,7 +250,7 @@ for i in range(args.epochs):
     if i != 0:
         correct = 0
         ranks = defaultdict(int)
-        for img_dir, img_idx, text in tqdm.tqdm(valid):
+        for img_dir, img_idx, text in valid:  # tqdm.tqdm(valid):
             img_files = list((Path(img_dirs) / img_dir).glob("*.jpg"))
             img_files = sorted(
                 img_files, key=lambda x: int(str(x).split("/")[-1].split(".")[0][3:])
@@ -267,9 +268,9 @@ for i in range(args.epochs):
             if ranked_files[0] == target:
                 correct += 1
             ranks[ranked_files.index(target) + 1] += 1
-        print(correct)
-        print(len(valid))
-        print(ranks)
+        print(correct, flush=True)
+        print(len(valid), flush=True)
+        print(ranks, flush=True)
         acc = correct / len(valid)
         wandb.log({"val_acc": acc})
         if acc > best_val:
@@ -286,9 +287,9 @@ for i in range(args.epochs):
                 },
                 f"checkpoints/CONTRA_clip_best_{string.replace('/', '')}.pt",
             )
-        print("------------------------------")
+        print("------------------------------", flush=True)
 
-    print(f"EPOCH: {i}")
+    print(f"EPOCH: {i}", flush=True)
     step = 0
     random.shuffle(train)
     for img_dir, img_idx, text in train:
@@ -308,8 +309,8 @@ for i in range(args.epochs):
         loss = loss_txt(logits_per_text, ground_truth)
         loss.backward()
         if step % config.batchsize == 0:  # fix
-            print("STEP: " + str(step))
-            print(f"TOTAL LOSS: {loss}")
+            print("STEP: " + str(step), flush=True)
+            print(f"TOTAL LOSS: {loss}", flush=True)
             wandb.log({"loss": loss})
             if device == "cpu":
                 optimizer.step()
