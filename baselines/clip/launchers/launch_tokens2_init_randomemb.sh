@@ -1,23 +1,13 @@
 #!/bin/bash
 
-#SBATCH --job-name=tok2_rdmemb
-
-#SBATCH --output=/private/home/rdessi/imagecode/baselines/clip/output/new_output/tokens2_randomemb_-%j.out
-#SBATCH --error=/private/home/rdessi/imagecode/baselines/clip/output/new_output/tokens2_randomemb_-%j.out
-
+#SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=10
-
-#SBATCH --partition=devlab
-
-#SBATCH --nodes=1
-
+#SBATCH --output=/private/home/rdessi/imagecode/baselines/clip/output/new_output/pret_tokens2_randomemb_%j.out
+#SBATCH --error=/private/home/rdessi/imagecode/baselines/clip/output/new_output/pret_tokens2_randomemb_%j.err
+#SBATCH --job-name=pret_tok2_rdmemb
 #SBATCH --ntasks-per-node=1
-
-#SBATCH --gpus-per-node=1
-
+#SBATCH --nodes=1
+#SBATCH --partition=devlab
 #SBATCH --time=72:00:00
 
-conda activate egg
-
-
-srun --label /private/home/rdessi/imagecode/baselines/clip/launchers/srun_tokens2_init_randomemb.sh
+srun /private/home/rdessi/imagecode/baselines/clip/launchers/srun_tokens2_init_randomemb.sh
