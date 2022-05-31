@@ -11,14 +11,7 @@ from PIL import Image
 import clip
 import torch
 
-try:
-    # requires python >= 3.7
-    from contextlib import nullcontext
-except ImportError:
-    # not exactly the same, but will do for our purposes
-    from contextlib import suppress as nullcontext
-
-import tqdm
+# import tqdm
 
 import wandb
 from torch import nn, optim
@@ -152,9 +145,6 @@ model, preprocess = clip.load("ViT-B/16", device=device, jit=False)
 wandb.watch(model)
 model.float()
 
-# for p in model.parameters():
-#     p.requires_grad = False
-
 img_dirs = args.imgs_path
 
 with open(args.valid_descr_path, "r") as fd:
@@ -177,44 +167,39 @@ loss_txt = nn.CrossEntropyLoss()
 clip_embeddings = get_clip_embeddings(max_vocab=args.max_clip_vocab)
 
 soft_embeddings = SoftEmbedding(
-    embeddings=clip_embeddings, n_tokens=config.n_tokens, init=config.prompt_init
+    embeddings=clip_embeddings, n_tokens=args.n_tokens, init=args.prompt_init
 ).to(device)
 
 optimizer = optim.Adam(
     [dict(params=soft_embeddings.parameters()), dict(params=model.parameters())],
-    lr=config.lr,  # fix
+    lr=args.lr,
     betas=(0.9, 0.98),
     eps=1e-6,
     weight_decay=0.2,
 )
 
 
-def encode_images(images, finetuning=False):
-    fwd_context = nullcontext() if finetuning else torch.no_grad()
-    with fwd_context:
-        photos_features = model.encode_image(images)
-        photos_features = photos_features / photos_features.norm(dim=-1, keepdim=True)
+def encode_images(images):
+    photos_features = model.encode_image(images)
+    photos_features = photos_features / photos_features.norm(dim=-1, keepdim=True)
     return photos_features
 
 
-def _encode_text(text, finetuning, add_soft_prompt):
-    ctx_len = text.shape[1]
-    eot_idx = get_eot_idx(text)
-
-    fwd_context = nullcontext() if finetuning else torch.no_grad()
-
-    with fwd_context:
-        # [batch_size, n_ctx, d_model]
-        x = model.token_embedding(text).type(model.dtype)
-        x = x + model.positional_embedding.type(model.dtype)
+def _encode_text(text, add_soft_prompt):
+    # [batch_size, n_ctx, d_model]
+    x = model.token_embedding(text).type(model.dtype)
+    x = x + model.positional_embedding.type(model.dtype)
 
     if add_soft_prompt:
-        if config.remove_head:
-            x = torch.cat([x[:, :1], x[:, config.n_tokens + 1 :]], dim=1)  # noqa
-        else:
-            x = x[:, : -config.n_tokens]  # noqa
+        ctx_len = text.shape[1]
+        eot_idx = get_eot_idx(text)
 
-            if ctx_len - config.n_tokens <= eot_idx:
+        if args.remove_head:
+            x = torch.cat([x[:, :1], x[:, args.n_tokens + 1 :]], dim=1)  # noqa
+        else:
+            x = x[:, : -args.n_tokens]  # noqa
+
+            if ctx_len - args.n_tokens <= eot_idx:
                 # 49407 is the  eot token for clip
                 eot = model.token_embedding(torch.Tensor([49407]).long().to(device))
                 eot = eot + model.positional_embedding[x.size(1) - 1].type(model.dtype)
@@ -222,28 +207,27 @@ def _encode_text(text, finetuning, add_soft_prompt):
 
         x = soft_embeddings(x)
 
-    with fwd_context:
-        x = x.permute(1, 0, 2)  # NLD -> LND
-        x = model.transformer(x)
-        x = x.permute(1, 0, 2)  # LND -> NLD
-        x = model.ln_final(x).type(model.dtype)
+    x = x.permute(1, 0, 2)  # NLD -> LND
+    x = model.transformer(x)
+    x = x.permute(1, 0, 2)  # LND -> NLD
+    x = model.ln_final(x).type(model.dtype)
 
-        # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ model.text_projection
+    # x.shape = [batch_size, n_ctx, transformer.width]
+    # take features from the eot embedding (eot_token is the highest number in each sequence)
+    x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ model.text_projection
 
     return x
 
 
-def encode_text(text, finetuning=False, add_soft_prompt=True):
-    text_encoded = _encode_text(text, finetuning, add_soft_prompt)
+def encode_text(text, add_soft_prompt):
+    text_encoded = _encode_text(text, add_soft_prompt)
     text_encoded = text_encoded / text_encoded.norm(dim=-1, keepdim=True)
     return text_encoded
 
 
-def model_forward(image, text, finetuning, add_soft_prompt):
-    image_features = encode_images(image, finetuning)
-    text_features = encode_text(text, finetuning, add_soft_prompt)
+def model_forward(image, text, add_soft_prompt):
+    image_features = encode_images(image)
+    text_features = encode_text(text, add_soft_prompt)
 
     # cosine similarity as logits
     logit_scale = model.logit_scale.exp()
@@ -251,29 +235,28 @@ def model_forward(image, text, finetuning, add_soft_prompt):
     logits_per_text = logits_per_image.t()
 
     # shape = [global_batch_size, global_batch_size]
-    return logits_per_image, logits_per_text
+    return logits_per_text
 
 
-finetuning = True
 best_val = 0
 for i in range(args.epochs):
     # EVALUATE
-    if i >= args.pretraining_epochs:
-        finetuning = False
+    finetuning = False if i >= args.pretraining_epochs else True
     if i != 0:
         correct = 0
         ranks = defaultdict(int)
-        for img_dir, img_idx, text in tqdm.tqdm(valid):
+        add_soft_prompt = i >= args.pretraining_epochs + 1
+        for img_dir, img_idx, text in valid:  # tqdm.tqdm(valid):
             img_files = list((Path(img_dirs) / img_dir).glob("*.jpg"))
             img_files = sorted(
                 img_files, key=lambda x: int(str(x).split("/")[-1].split(".")[0][3:])
             )
             images = [Image.open(photo_file) for photo_file in img_files]
             images = torch.stack([preprocess(photo) for photo in images]).to(device)
+            text = clip.tokenize(text.strip(), truncate=True).to(device)
             with torch.no_grad():
                 img_embs = encode_images(images)
-                text = clip.tokenize(text.strip(), truncate=True).to(device)
-                text_emb = encode_text(text, add_soft_prompt=(not finetuning))
+                text_emb = encode_text(text, add_soft_prompt=add_soft_prompt)
             ranked_idx, sim = find_best_matches(text_emb, img_embs)
             ranked_files = [
                 str(img_files[rank]).split("/")[-1][:-4] for rank in ranked_idx
@@ -288,6 +271,7 @@ for i in range(args.epochs):
         acc = correct / len(valid)
         print(f"acc {acc}", flush=True)
         wandb.log({"val_acc": acc})
+        wandb.log({"epoch": i + 1})
         if acc > best_val:
             best_val = acc
             string = ""
@@ -300,11 +284,12 @@ for i in range(args.epochs):
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                 },
-                f"checkpoints/CONTRA_clip_best_{string.replace('/', '')}.pt",
+                f"checkpoints/CONTRA_clip_best_new_pretr_{string.replace('/', '')}.pt",
             )
         print("------------------------------", flush=True)
 
     print(f"EPOCH: {i}", flush=True)
+    optimizer.zero_grad()
     step = 0
     random.shuffle(train)
     for img_dir, img_idx, text in train:
@@ -315,17 +300,22 @@ for i in range(args.epochs):
         img_files = sorted(
             img_files, key=lambda x: int(str(x).split("/")[-1].split(".")[0][3:])
         )
+
         images = [Image.open(photo_file) for photo_file in img_files]
         images = torch.stack([preprocess(photo) for photo in images]).to(device)
         text = clip.tokenize(text, truncate=True).to(device)
-        logits_per_image, logits_per_text = model_forward(
-            images, text, finetuning=finetuning, add_soft_prompt=(not finetuning)
-        )
+
+        logits_per_text = model_forward(images, text, add_soft_prompt=(not finetuning))
+
         # the index of the correct one
         ground_truth = torch.tensor([img_idx]).long().to(device)
         loss = loss_txt(logits_per_text, ground_truth)
         loss.backward()
-        if step % config.batchsize == 0:  # fix
+        if step % args.batchsize == 0:
+            if not finetuning:
+                for p in model.parameters():
+                    p.grad = None
+
             print("STEP: " + str(step), flush=True)
             print(f"TOTAL LOSS: {loss}", flush=True)
             wandb.log({"loss": loss})
