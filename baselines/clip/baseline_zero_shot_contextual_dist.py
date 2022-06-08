@@ -1,15 +1,16 @@
 # inspired from: https://github.com/openai/CLIP/issues/83
 # https://github.com/openai/CLIP/issues/83
+
+import argparse
 import json
 import random
+from collections import defaultdict
+from pathlib import Path
+from PIL import Image
+
 import clip
 import torch
 import tqdm
-from torch import nn
-from PIL import Image
-from pathlib import Path
-from collections import defaultdict
-import argparse
 
 random.seed(10)
 torch.manual_seed(10)
@@ -17,9 +18,8 @@ torch.manual_seed(10)
 
 def encode_images(photos_batch):
     photos = [Image.open(photo_file) for photo_file in photos_batch]
-    photos_preprocessed = torch.stack([preprocess(photo) for photo in photos]).to(
-        device
-    )
+    photos_preprocessed = torch.stack([preprocess(photo) for photo in photos])
+    photos_preprocessed = photos_preprocessed.to(device)
 
     with torch.no_grad():
         photos_features = model.encode_image(photos_preprocessed)
@@ -51,27 +51,18 @@ def convert_models_to_fp32(model):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--valid_descr_path", type=str, default="../../data/valid_data.json"
-)
-parser.add_argument(
-    "--train_descr_path", type=str, default="../../data/train_data.json"
-)
-parser.add_argument(
-    "--imgs_path", type=str, default="/network/scratch/b/benno.krojer/dataset/games"
-)
+parser.add_argument("--valid_descr_path", default="../../data/valid_data.json")
+parser.add_argument("--clip_model", default="ViT-B/16")
+parser.add_argument("--imgs_path", default="../../data/images/")
+parser.add_argument("--output_path", default=None)
 
 args = parser.parse_args()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"DEVICE USED: {device}")
-model, preprocess = clip.load("ViT-B/16", device=device, jit=False)
-if device == "cpu":
-    model.float()
-else:
-    clip.model.convert_weights(
-        model
-    )  # Actually this line is unnecessary since clip by default already on float16
+model, preprocess = clip.load(args.clip_model, device=device)
+
+clip.model.convert_weights(model)
 
 img_dirs = args.imgs_path
 valid_data = json.load(open(args.valid_descr_path, "r"))
@@ -82,6 +73,7 @@ for img_dir, data in valid_data.items():
 
 correct = 0
 ranks = defaultdict(int)
+accs, captions, is_video = [], [], []
 for img_dir, img_idx, text in tqdm.tqdm(valid):
     img_files = list((Path(img_dirs) / img_dir).glob("*.jpg"))
     img_files = sorted(
@@ -95,8 +87,30 @@ for img_dir, img_idx, text in tqdm.tqdm(valid):
     if ranked_files[0] == target:
         correct += 1
     ranks[ranked_files.index(target) + 1] += 1
+
+    captions.append(text)
+    accs.append(ranked_files[0] == target)
+    is_video.append("open-images" not in img_dir)
+
 print(correct)
 print(len(valid))
 print(ranks)
 acc = correct / len(valid)
 print(f"final_acc {acc}")
+
+
+if args.output_path is not None:
+    acc_tnsr = torch.Tensor(accs).float()
+    interaction = dict(
+        sender_input=None,
+        receiver_input=None,
+        labels=None,
+        message=None,
+        receiver_output=None,
+        message_length=None,
+        aux={"acc": acc_tnsr},
+        aux_input={"decoded_captions": captions, "decoded_messages": None},
+    )
+
+    output_path = Path(args.output_path)
+    torch.save(interaction, output_path / "interaction")
