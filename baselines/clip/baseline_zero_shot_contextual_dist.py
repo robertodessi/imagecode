@@ -40,8 +40,8 @@ def find_best_matches(text_features, photo_features):
     similarities = (photo_features @ text_features.T).squeeze(1)
     best_photo_idx = (-similarities).argsort()
     similarities = -similarities
-    similarities.sort()
-    return best_photo_idx, similarities
+    sorted_similarities = sorted(similarities)
+    return best_photo_idx, sorted_similarities, -similarities
 
 
 def convert_models_to_fp32(model):
@@ -73,7 +73,8 @@ for img_dir, data in valid_data.items():
 
 correct = 0
 ranks = defaultdict(int)
-accs, captions, is_video = [], [], []
+captions, is_video, sims = [], [], []
+labels, accs = [], []
 for img_dir, img_idx, text in tqdm.tqdm(valid):
     img_files = list((Path(img_dirs) / img_dir).glob("*.jpg"))
     img_files = sorted(
@@ -81,8 +82,10 @@ for img_dir, img_idx, text in tqdm.tqdm(valid):
     )
     img_embs = encode_images(img_files)
     text_emb = encode_text(text.strip())
-    ranked_idx, sim = find_best_matches(text_emb, img_embs)
+    ranked_idx, sim, unsorted_sims = find_best_matches(text_emb, img_embs)
+    sims.append(unsorted_sims)
     ranked_files = [str(img_files[rank]).split("/")[-1][:-4] for rank in ranked_idx]
+    labels.append(torch.tensor([img_idx]).long())
     target = str(img_files[int(img_idx)]).split("/")[-1][:-4]
     if ranked_files[0] == target:
         correct += 1
@@ -90,7 +93,7 @@ for img_dir, img_idx, text in tqdm.tqdm(valid):
 
     captions.append(text)
     accs.append(ranked_files[0] == target)
-    is_video.append("open-images" not in img_dir)
+    is_video.append(torch.Tensor(["open-images" not in img_dir]))
 
 print(correct)
 print(len(valid))
@@ -99,17 +102,18 @@ acc = correct / len(valid)
 print(f"final_acc {acc}")
 
 
+breakpoint()
 if args.output_path is not None:
     acc_tnsr = torch.Tensor(accs).float()
     interaction = dict(
         sender_input=None,
         receiver_input=None,
-        labels=None,
+        labels=labels,
         message=None,
-        receiver_output=None,
+        receiver_output=sims,
         message_length=None,
         aux={"acc": acc_tnsr},
-        aux_input={"decoded_captions": captions, "decoded_messages": None},
+        aux_input={"decoded_captions": captions, "decoded_messages": None, "is_video": is_video},
     )
 
     output_path = Path(args.output_path)
